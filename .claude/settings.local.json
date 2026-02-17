@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"d:/DEV-Openclaw/260216-cctv/venv/Scripts/python.exe\" -c:*)",
+      "Bash(\"d:/DEV-Openclaw/260216-cctv/venv/Scripts/python.exe\":*)",
+      "Bash(\"d:/DEV-Openclaw/260216-cctv/venv/Scripts/python.exe\" -c \"from ultralytics import YOLO; print\\(''Ultralytics YOLO 설치됨''\\)\")",
+      "Bash(nvidia-smi:*)",
+      "Bash(\"d:/DEV-Openclaw/260216-cctv/venv/Scripts/python.exe\" --version)",
+      "Bash(wmic:*)",
+      "Bash(powershell \"Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion\")",
+      "Bash(systeminfo:*)",
+      "Bash(powershell \"Get-CimInstance -ClassName Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors\")",
+      "mcp__sequential-thinking__sequentialthinking"
+    ]
+  }
+}

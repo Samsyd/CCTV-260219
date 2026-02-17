@@ -1,0 +1,5 @@
+venv/
+venv_ai/
+__pycache__/
+*.log
+captures/
