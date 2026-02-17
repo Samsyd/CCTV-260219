@@ -7,6 +7,7 @@ from collections import Counter
 import csv
 from datetime import datetime
 from ultralytics import YOLO
+import numpy as np
 
 def save_log(log_type, text, prob):
     log_dir = 'logs'
@@ -24,7 +25,7 @@ def save_log(log_type, text, prob):
 def main():
     if not os.path.exists('captures'): os.makedirs('captures')
 
-    print("Nova Pattern-Hunter (BIC Code Priority) 엔진 초기화 중...")
+    print("Nova Pattern-Hunter (High-Resolution Boost) 초기화 중...")
     yolo_model = YOLO('yolov8n.pt')
     reader = easyocr.Reader(['en'], gpu=False)
     
@@ -36,15 +37,11 @@ def main():
     ccr_confirmed = ""
     display_boxes = []
 
-    print("시스템 가동: 패턴 기반 인식 모드 (규격: 영문4자 + 숫자7자)")
-
     while True:
         ret, frame = cap.read()
         if not ret: break
         
         h, w = frame.shape[:2]
-
-        # [1단계] 광범위 객체 탐지
         img_small = cv2.resize(frame, (320, 240))
         yolo_results = yolo_model(img_small, verbose=False, conf=0.25, classes=[2, 5, 6, 7])
         
@@ -55,68 +52,60 @@ def main():
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 detected_targets.append((int(x1*scale_x), int(y1*scale_y), int(x2*scale_x), int(y2*scale_y)))
 
-        # [2단계 & 3단계] 패턴 매칭 기반 OCR (0.7초 주기)
         current_time = time.time()
-        if current_time - last_ocr_time > 0.7:
+        if current_time - last_ocr_time > 0.8:
             display_boxes = []
-            
-            # 탐지된 물체가 있으면 그 영역을, 없으면 화면 전체를 분석
             search_areas = detected_targets if detected_targets else [(0, 0, w, h)]
             
             for (sx1, sy1, sx2, sy2) in search_areas:
-                # 마진 추가
-                sx1, sy1 = max(0, sx1-20), max(0, sy1-20)
-                sx2, sy2 = min(w, sx2+20), min(h, sy2+20)
-                
-                roi = frame[sy1:sy2, sx1:sx2]
+                # ROI 확대 분석 (1.5배)
+                roi = frame[max(0, sy1-30):min(h, sy2+30), max(0, sx1-30):min(w, sx2+30)]
                 if roi.size == 0: continue
                 
-                # 이미지 전처리: 패턴 부각을 위한 대비 최적화
-                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                processed_roi = cv2.adaptiveThreshold(gray_roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                h_r, w_r = roi.shape[:2]
+                roi_zoom = cv2.resize(roi, (int(w_r*1.5), int(h_r*1.5)), interpolation=cv2.INTER_CUBIC)
+                
+                # 샤프닝 커널 적용
+                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+                sharpened = cv2.filter2D(roi_zoom, -1, kernel)
+                
+                # 전처리: 대비 강화
+                gray = cv2.cvtColor(sharpened, cv2.COLOR_BGR2GRAY)
+                processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 13, 5)
 
-                # 전방위 회전 스캔 (세로 번호 대응)
-                res = reader.readtext(processed_roi, rotation_info=[90, 270], paragraph=True)
+                res = reader.readtext(processed, rotation_info=[90, 270], paragraph=True, mag_ratio=2.0)
                 
                 for (bbox, text) in res:
-                    # 영문/숫자만 남김
                     clean_text = re.sub(r'[^A-Z0-9]', '', text.upper())
-                    
-                    # [핵심] 컨테이너 번호 규격 필터링: 영문 4자 + 숫자 6~7자
-                    # 패턴: ^[A-Z]{4}[0-9]{6,7}$
-                    if re.search(r'[A-Z]{4}[0-9]{6,7}', clean_text):
+                    if re.search(r'[A-Z]{3,4}\d{5,7}', clean_text) or len(clean_text) >= 10:
                         ccr_history.append(clean_text)
-                        # 좌표 변환 및 표시용 저장
                         (tl, tr, br, bl) = bbox
-                        display_boxes.append(((int(tl[0]+sx1), int(tl[1]+sy1)), 
-                                            (int(br[0]+sx1), int(br[1]+sy1)), clean_text))
-                        print(f"★ 규격 일치 번호 감지: {clean_text}")
+                        orig_tl = (int(tl[0]/1.5 + max(0, sx1-30)), int(tl[1]/1.5 + max(0, sy1-30)))
+                        orig_br = (int(br[0]/1.5 + max(0, sx1-30)), int(br[1]/1.5 + max(0, sy1-30)))
+                        display_boxes.append((orig_tl, orig_br, clean_text))
+                        print(f"★ 패턴 포착: {clean_text}")
 
-            # 투표 시스템으로 신뢰도 확보
             if len(ccr_history) > 15: ccr_history.pop(0)
             if ccr_history:
                 counts = Counter(ccr_history)
                 most = counts.most_common(1)[0]
-                if most[1] >= 2: # 2회 반복 시 확정
+                if most[1] >= 2:
                     if ccr_confirmed != most[0]:
                         ccr_confirmed = most[0]
-                        save_log('CCR', ccr_confirmed, 0.95)
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        cv2.imwrite(f"captures/CCR_PATTERN_{timestamp}_{ccr_confirmed}.jpg", frame)
+                        save_log('CCR', ccr_confirmed, 0.9)
+                        cv2.imwrite(f"captures/CCR_BOOST_{datetime.now().strftime('%H%M%S')}.jpg", frame)
 
             last_ocr_time = current_time
 
-        # 시각화
         if ccr_confirmed:
             cv2.rectangle(frame, (10, h-70), (550, h-10), (0, 0, 0), -1)
-            cv2.putText(frame, f"CONFIRMED CCR: {ccr_confirmed}", (20, h-30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+            cv2.putText(frame, f"CONFIRMED CCR: {ccr_confirmed}", (20, h-30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
 
         for (pt1, pt2, txt) in display_boxes:
             cv2.rectangle(frame, pt1, pt2, (0, 0, 255), 2)
             cv2.putText(frame, txt, (pt1[0], pt1[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        cv2.imshow("Nova Pattern-Hunter Master", frame)
+        cv2.imshow("Nova CCR Boost Monitor", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
 
     cap.release(); cv2.destroyAllWindows()
