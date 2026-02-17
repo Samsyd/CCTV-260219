@@ -8,120 +8,150 @@ import csv
 from datetime import datetime
 from ultralytics import YOLO
 import numpy as np
+import threading
+
+# 전역 변수
+latest_frame = None
+confirmed_ccr = ""
+is_running = True
+display_boxes = []
 
 def save_log(log_type, text, prob):
     log_dir = 'logs'
     if not os.path.exists(log_dir): os.makedirs(log_dir)
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"{log_dir}/{today}_gate_log.csv"
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    file_exists = os.path.isfile(filename)
+    filename = f"{log_dir}/{datetime.now().strftime('%Y-%m-%d')}_gate_log.csv"
     with open(filename, mode='a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(['Time', 'Type', 'Result', 'Confidence'])
-        writer.writerow([timestamp, log_type, text, f"{prob:.2f}"])
+        csv.writer(f).writerow([datetime.now().strftime("%H:%M:%S"), log_type, text, f"{prob:.2f}"])
 
 def check_bic_code(text):
+    """컨테이너 BIC Code 정밀 검증 (영문4+숫자6~7)"""
     clean = re.sub(r'[^A-Z0-9]', '', text.upper())
-    # 실전용: 영문4자 + 숫자 6~7자
-    match = re.search(r'[A-Z]{3,4}\d{5,7}', clean)
-    return match.group() if match else None
+    # 1. 표준 규격 (영문4 + 숫자7)
+    match = re.search(r'[A-Z]{4}\d{7}', clean)
+    if match: return match.group()
+    # 2. 완화 규격 (영문4 + 숫자6)
+    match = re.search(r'[A-Z]{4}\d{6}', clean)
+    if match: return match.group()
+    return None
+
+def ai_worker():
+    global latest_frame, confirmed_ccr, display_boxes
+    print("Nova Optimized CCR Engine 가동...")
+    
+    # OCR 엔진 초기화 (가장 강력한 감지 모드)
+    reader = easyocr.Reader(['en'], gpu=False)
+    yolo_model = YOLO('yolov8n.pt')
+    ccr_history = []
+
+    while is_running:
+        if latest_frame is None:
+            time.sleep(0.1)
+            continue
+
+        frame_to_proc = latest_frame.copy()
+        h, w = frame_to_proc.shape[:2]
+        
+        # [1단계] 고감도 물체 탐지 (YOLO)
+        img_small = cv2.resize(frame_to_proc, (320, 240))
+        yolo_res = yolo_model(img_small, verbose=False, conf=0.15, classes=[2, 5, 6, 7])
+        
+        search_areas = []
+        for r in yolo_res:
+            for box in r.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # 영역 대폭 확장 (컨테이너 박스 외곽 번호 대비)
+                margin = 50
+                search_areas.append((max(0, int(x1*w/320)-margin), max(0, int(y1*h/240)-margin), 
+                                     min(w, int(x2*w/320)+margin), min(h, int(y2*h/240)+margin)))
+        
+        if not search_areas: search_areas = [(0, 0, w, h)]
+
+        new_boxes = []
+        for (sx1, sy1, sx2, sy2) in search_areas:
+            roi = frame_to_proc[sy1:sy2, sx1:sx2]
+            if roi.size == 0: continue
+            
+            # [2단계] 저화질/세로형 특화 전처리 (핵심!)
+            # 이미지 2배 확대 + 샤프닝 + 적응형 이진화
+            roi_zoom = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            gray = cv2.cvtColor(roi_zoom, cv2.COLOR_BGR2GRAY)
+            
+            # 커널 샤프닝으로 글자 경계 복원
+            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+            gray = cv2.filter2D(gray, -1, kernel)
+            
+            # 적응형 이진화 (그림자/반사 무력화)
+            processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8)
+
+            # [3단계] 전방위 OCR 분석
+            res = reader.readtext(processed, rotation_info=[90, 270], paragraph=True, 
+                                 low_text=0.2, link_threshold=0.1, mag_ratio=2.5)
+            
+            # 낱글자 병합을 위한 리스트
+            captured_texts = []
+            for (bbox, text) in res:
+                clean = re.sub(r'[^A-Z0-9]', '', text.upper())
+                if len(clean) > 0:
+                    captured_texts.append(clean)
+                    # 표시용 박스 계산 (2배 확대 반영)
+                    (tl, tr, br, bl) = bbox
+                    new_boxes.append(((int(tl[0]/2 + sx1), int(tl[1]/2 + sy1)), 
+                                     (int(br[0]/2 + sx1), int(br[1]/2 + sy1)), clean))
+
+            # [핵심] 공간적/논리적 병합 시도
+            full_raw = "".join(captured_texts)
+            code = check_bic_code(full_raw)
+            
+            if not code: # 개별 텍스트에서도 한 번 더 확인
+                for t in captured_texts:
+                    if check_bic_code(t): code = check_bic_code(t); break
+
+            if code:
+                ccr_history.append(code)
+                print(f"★ 최적화 엔진 포착: {code}")
+
+        display_boxes = new_boxes
+
+        # 투표로 확정 (2회 일치 시)
+        if len(ccr_history) > 12: ccr_history.pop(0)
+        if ccr_history:
+            most = Counter(ccr_history).most_common(1)[0]
+            if most[1] >= 2:
+                if confirmed_ccr != most[0]:
+                    confirmed_ccr = most[0]
+                    save_log('CCR', confirmed_ccr, 0.9)
+
+        time.sleep(0.5) # CPU 효율 관리
 
 def main():
-    if not os.path.exists('captures'): os.makedirs('captures')
+    global latest_frame, is_running
+    threading.Thread(target=ai_worker, daemon=True).start()
 
-    print("Nova Gate-Master Pro (Low-Res Optimized) 초기화 중...")
-    yolo_model = YOLO('yolov8n.pt')
-    # 감지 민감도를 극대화한 설정
-    reader = easyocr.Reader(['en'], gpu=False)
-    
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened(): cap = cv2.VideoCapture(0)
-    
-    last_ocr_time = time.time()
-    ccr_history = []
-    ccr_confirmed = ""
 
-    print("시스템 가동: 저화질 현장 모드 (Dilation + High-Sensitivity)")
+    print("컨테이너 최적화 인식 모드 가동! 'q' 종료")
 
     while True:
         ret, frame = cap.read()
         if not ret: break
-        
+        latest_frame = frame.copy()
         h, w = frame.shape[:2]
-        
-        # [1단계] 물체 감지 생략 및 화면 전체 감시 (저화질에서는 YOLO가 더 방해될 수 있음)
-        # 하지만 큰 틀을 잡기 위해 YOLO 결과가 있으면 그 영역을 우선적으로 봅니다.
-        img_small = cv2.resize(frame, (320, 240))
-        yolo_results = yolo_model(img_small, verbose=False, conf=0.15, classes=[2, 5, 6, 7])
-        
-        search_areas = []
-        scale_x, scale_y = w/320, h/240
-        for r in yolo_results:
-            for box in r.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                search_areas.append((int(x1*scale_x), int(y1*scale_y), int(x2*scale_x), int(y2*scale_y)))
-        
-        if not search_areas: search_areas = [(0, 0, w, h)] # 차 안 잡히면 전체 감시
 
-        current_time = time.time()
-        if current_time - last_ocr_time > 0.8:
-            for (sx1, sy1, sx2, sy2) in search_areas:
-                # ROI 추출 및 확장
-                roi = frame[max(0, sy1-20):min(h, sy2+20), max(0, sx1-20):min(w, sx2+20)]
-                if roi.size == 0: continue
-                
-                # --- [저화질 전용 전처리 핵심] ---
-                # 1. 2배 확대 (Cubic)
-                roi_zoom = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                gray = cv2.cvtColor(roi_zoom, cv2.COLOR_BGR2GRAY)
-                
-                # 2. 노이즈 제거 및 대비 강화
-                gray = cv2.GaussianBlur(gray, (3,3), 0)
-                gray = cv2.equalizeHist(gray)
-                
-                # 3. 모폴로지 팽창 (끊긴 글자 이어주기)
-                kernel = np.ones((2,2), np.uint8)
-                dilated = cv2.dilate(gray, kernel, iterations=1)
-                
-                # 4. 다중 이진화 시도 (Adaptive + Simple)
-                processed = cv2.adaptiveThreshold(dilated, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 7)
+        # UI 가이드 및 결과
+        if confirmed_ccr:
+            cv2.rectangle(frame, (10, h-80), (550, h-10), (0, 0, 0), -1)
+            cv2.putText(frame, f"FINAL CCR: {confirmed_ccr}", (20, h-30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
 
-                # [고민감도 OCR]
-                # low_text: 아주 낮은 선명도의 텍스트도 감지 (기본 0.4 -> 0.2)
-                # link_threshold: 글자 사이 간격이 멀어도 이어줌 (기본 0.4 -> 0.1)
-                res = reader.readtext(processed, rotation_info=[90, 270], paragraph=True, 
-                                     low_text=0.2, link_threshold=0.1, mag_ratio=2.5)
-                
-                raw_full_text = "".join([re.sub(r'[^A-Z0-9]', '', r[1].upper()) for r in res])
-                
-                # 개별 및 병합 텍스트에서 BIC Code 추출
-                code = check_bic_code(raw_full_text)
-                if code:
-                    ccr_history.append(code)
-                    print(f"★ 저화질 엔진 포착: {code}")
+        for (pt1, pt2, txt) in display_boxes:
+            cv2.rectangle(frame, pt1, pt2, (0, 0, 255), 2)
+            cv2.putText(frame, txt, (pt1[0], pt1[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-            if len(ccr_history) > 15: ccr_history.pop(0)
-            if ccr_history:
-                counts = Counter(ccr_history)
-                most = counts.most_common(1)[0]
-                if most[1] >= 2:
-                    if ccr_confirmed != most[0]:
-                        ccr_confirmed = most[0]
-                        save_log('CCR', ccr_confirmed, 0.75)
-                        cv2.imwrite(f"captures/CCR_LOWRES_{datetime.now().strftime('%H%M%S')}.jpg", frame)
-
-            last_ocr_time = current_time
-
-        # UI 출력
-        if ccr_confirmed:
-            cv2.rectangle(frame, (10, h-70), (600, h-10), (0, 0, 0), -1)
-            cv2.putText(frame, f"CONFIRMED CCR (LOW-RES): {ccr_confirmed}", (20, h-30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-        cv2.imshow("Nova Low-Res Master", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
+        cv2.imshow("Nova CCR Optimized Master", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            is_running = False
+            break
 
     cap.release(); cv2.destroyAllWindows()
 
