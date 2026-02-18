@@ -26,7 +26,7 @@ def get_brand_info(ip):
         print("HTTP를 통한 정보 획득 실패.")
 
 def main():
-    target_ips = ["192.168.0.4", "192.168.0.23", "192.168.0.100"]
+    target_ips = ["192.168.0.4", "192.168.0.23", "192.168.0.20", "192.168.0.100"]
     for ip in target_ips:
         get_brand_info(ip)
 
